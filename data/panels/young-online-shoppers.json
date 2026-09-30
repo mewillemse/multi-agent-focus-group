@@ -1,0 +1,10 @@
+{
+    "id": "young-online-shoppers",
+    "name": "Young online shoppers",
+    "description": "A generic panel of mobile-first shoppers who prioritize quick decisions and clear value.",
+    "personaIds": [
+        "ava-chen",
+        "daniel-park"
+    ],
+    "outsiderPolicy": "auto"
+}

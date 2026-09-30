@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multi-Agent Focus Group</title>
+    <link rel="stylesheet" href="/styles.css" />
+</head>
+
+<body>
+    <div class="app-shell">
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">Prototype</p>
+                <h1>Multi-Agent Focus Group</h1>
+            </div>
+            <div class="status-pill">AI simulation • not real users</div>
+        </header>
+
+        <main class="layout">
+            <aside class="panel left-panel">
+                <section>
+                    <h2>Session setup</h2>
+                    <form id="session-form">
+                        <label>
+                            <span>URL</span>
+                            <input id="url-input" type="url" value="https://example.com" required />
+                        </label>
+
+                        <label>
+                            <span>Scenario</span>
+                            <textarea id="scenario-input"
+                                rows="4">A small online storefront wants to help new shoppers find products quickly and trust the checkout flow.</textarea>
+                        </label>
+
+                        <div class="field-row">
+                            <label>
+                                <span>Device</span>
+                                <select id="device-input">
+                                    <option value="desktop">Desktop</option>
+                                    <option value="mobile">Mobile</option>
+                                </select>
+                            </label>
+                        </div>
+
+                        <label class="checkbox-field">
+                            <input id="accept-cookies-input" type="checkbox" checked />
+                            Accept cookie banners automatically
+                        </label>
+
+                        <button type="submit">Start simulation</button>
+                    </form>
+                </section>
+
+                <section>
+                    <h3>Persona selection</h3>
+                    <div id="persona-list" class="persona-list"></div>
+                </section>
+            </aside>
+
+            <section class="panel right-panel">
+                <div class="session-summary" id="session-summary">
+                    <p>No session started yet.</p>
+                </div>
+
+                <ol class="phase-steps" id="phase-steps"></ol>
+
+                <div class="stage">
+                    <figure class="capture" id="capture">
+                        <p class="empty-note">The page screenshot appears here once it has loaded.</p>
+                    </figure>
+                    <div class="persona-feed" id="persona-feed"></div>
+                </div>
+
+                <details class="event-log">
+                    <summary>Event log</summary>
+                    <ul id="event-list"></ul>
+                </details>
+            </section>
+        </main>
+    </div>
+
+    <script src="/js/app.js"></script>
+</body>
+
+</html>
