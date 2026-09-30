@@ -9,17 +9,10 @@ const personaFeed = document.getElementById('persona-feed');
 const PHASES = [
     ['setup', 'Setup'],
     ['goal', 'Goals'],
-    ['capture', 'Page load'],
-    ['experience', 'Experience'],
+    ['experience', 'Browsing'],
     ['reflection', 'Reflection'],
     ['done', 'Done'],
 ];
-
-const PERSONA_PHASE_TITLES = {
-    goal: 'Goal',
-    experience: 'First impression',
-    reflection: 'Looking back',
-};
 
 const EMOTIONS = {
     curious: '🤔',
@@ -32,11 +25,25 @@ const EMOTIONS = {
     anxious: '😟',
 };
 
+const ACTION_ICONS = {
+    click: '👆',
+    type: '⌨️',
+    scroll: '📜',
+    back: '↩️',
+    done: '🏁',
+    leave: '🚪',
+};
+
 let selectedPersonaIds = [];
 let personasById = new Map();
 let eventSource = null;
-let capture = null;
-let cards = new Map();
+
+// Session state, rebuilt from the event stream.
+let cards = new Map(); // personaId -> card entry
+let captures = new Map(); // "personaId:step" -> capture payload
+let latestCaptureKey = null; // what the screenshot panel follows by default
+let pinnedCaptureKey = null; // set by clicking a thumbnail
+let shownCaptureKey = null;
 
 async function loadPersonas() {
     const response = await fetch('/api/personas');
@@ -90,44 +97,69 @@ function avatar(persona) {
     return node;
 }
 
+function personaName(personaId) {
+    return personasById.get(personaId)?.name || personaId;
+}
+
 function addEventLog(label, message) {
     const item = document.createElement('li');
     item.append(el('small', null, label), el('div', null, message));
     eventList.prepend(item);
 }
 
-// Turns "the search bar [e4]" into text with a hoverable element chip.
-function proseWithElementRefs(text) {
+const captureKey = (personaId, step) => `${personaId}:${step}`;
+
+// Turns "the search bar [e4]" or "sizes [e19, e20]" into text with chips that highlight
+// those elements on that capture's screenshot.
+function proseWithElementRefs(text, key) {
     const fragment = document.createDocumentFragment();
-    for (const part of text.split(/(\[e\d+\])/)) {
-        const match = part.match(/^\[(e\d+)\]$/);
-        fragment.append(match ? elementChip(match[1]) : document.createTextNode(part));
+    for (const part of (text || '').split(/(\[e\d+(?:\s*,\s*e\d+)*\])/)) {
+        if (!/^\[e\d+/.test(part)) {
+            fragment.append(part);
+            continue;
+        }
+        part.match(/e\d+/g).forEach((id, index) => {
+            if (index) fragment.append(' ');
+            fragment.append(elementChip(id, key));
+        });
     }
     return fragment;
 }
 
-function elementChip(elementId, label) {
-    const chip = el('button', 'element-chip', label || elementId);
+function elementChip(elementId, key) {
+    const chip = el('button', 'element-chip', elementId);
     chip.type = 'button';
-    const element = capture?.elements.find((item) => item.id === elementId);
+    const element = captures.get(key)?.elements.find((item) => item.id === elementId);
     chip.title = element ? `${element.role}${element.name ? ` "${element.name}"` : ''}` : 'Unknown element';
-    const show = () => highlightElement(elementId);
+
+    const show = () => {
+        showCapture(key);
+        highlightElement(elementId);
+    };
+    const hide = () => {
+        clearHighlight();
+        showCapture(pinnedCaptureKey || latestCaptureKey);
+    };
     chip.addEventListener('mouseenter', show);
     chip.addEventListener('focus', show);
-    chip.addEventListener('mouseleave', clearHighlight);
-    chip.addEventListener('blur', clearHighlight);
+    chip.addEventListener('mouseleave', hide);
+    chip.addEventListener('blur', hide);
     return chip;
 }
 
 // ---------- session view ----------
 
 function resetView(data) {
-    capture = null;
     cards = new Map();
+    captures = new Map();
+    latestCaptureKey = null;
+    pinnedCaptureKey = null;
+    shownCaptureKey = null;
+
     eventList.innerHTML = '';
     personaFeed.innerHTML = '';
     captureView.innerHTML = '';
-    captureView.append(el('p', 'empty-note', 'The page screenshot appears here once it has loaded.'));
+    captureView.append(el('p', 'empty-note', 'Screenshots appear here as the personas browse.'));
     renderPhaseSteps(null);
 
     sessionSummary.innerHTML = '';
@@ -153,7 +185,7 @@ function resetView(data) {
         card.append(header, status, phases);
         personaFeed.append(card);
 
-        cards.set(id, { card, badge, status, phases, blocks: new Map() });
+        cards.set(id, { card, badge, status, phases, blocks: new Map(), lastCaptureKey: null });
     }
 }
 
@@ -176,8 +208,10 @@ function setEmotion(entry, emotion, intensity) {
     entry.badge.title = intensity ? `Intensity ${intensity}/5` : emotion;
 }
 
-function renderCapture(data) {
-    capture = data;
+function showCapture(key) {
+    const data = key && captures.get(key);
+    if (!data || key === shownCaptureKey) return;
+    shownCaptureKey = key;
     captureView.innerHTML = '';
 
     const frame = el('div', 'capture-frame');
@@ -190,9 +224,11 @@ function renderCapture(data) {
 
     const caption = el('figcaption');
     caption.append(
+        el('span', 'capture-owner', `${personaName(data.personaId)} · screen ${data.step}`),
         el('strong', null, data.title || data.url),
-        el('small', null, `${data.device} · HTTP ${data.status ?? '?'} · ${data.elements.length} elements`),
+        el('small', null, `${data.device} · ${data.url}`),
     );
+
     const consent = data.cookieConsent;
     if (consent?.accepted) {
         caption.append(el('small', null, `🍪 Cookie banner accepted automatically ("${consent.label}")`));
@@ -201,17 +237,28 @@ function renderCapture(data) {
     }
     if (data.blockedReason) caption.append(el('p', 'warning', data.blockedReason));
 
+    if (pinnedCaptureKey === key) {
+        const follow = el('button', 'link-button', '📌 Pinned — follow live instead');
+        follow.type = 'button';
+        follow.addEventListener('click', () => {
+            pinnedCaptureKey = null;
+            showCapture(latestCaptureKey);
+        });
+        caption.append(follow);
+    }
+
     captureView.append(frame, caption);
 }
 
 function highlightElement(elementId) {
-    const element = capture?.elements.find((item) => item.id === elementId);
+    const data = captures.get(shownCaptureKey);
+    const element = data?.elements.find((item) => item.id === elementId);
     const frame = captureView.querySelector('.capture-frame');
     if (!element || !frame) return;
 
     const image = frame.querySelector('img');
     const highlight = frame.querySelector('.element-highlight');
-    const scale = image.clientWidth / capture.viewport.width;
+    const scale = image.clientWidth / data.viewport.width;
 
     highlight.classList.toggle('offscreen', !element.inViewport);
     highlight.textContent = element.inViewport ? '' : `${elementId} is not visible on this screen`;
@@ -234,19 +281,28 @@ function clearHighlight() {
     captureView.querySelector('.element-highlight')?.classList.remove('visible');
 }
 
-function phaseBlock(entry, phase) {
-    if (!entry.blocks.has(phase)) {
-        const block = el('section', 'phase-block');
-        const prose = el('p', 'prose streaming');
-        const facts = el('div', 'facts');
-        block.append(el('h4', null, PERSONA_PHASE_TITLES[phase] || phase), prose, facts);
-        entry.phases.append(block);
-        entry.blocks.set(phase, { prose, facts });
-    }
-    return entry.blocks.get(phase);
+function blockTitle(phase, step) {
+    if (phase === 'goal') return 'Goal';
+    if (phase === 'reflection') return 'Looking back';
+    return `Screen ${step}`;
 }
 
-function renderFacts(facts, phase, data) {
+function phaseBlock(entry, phase, step) {
+    const key = step ? `${phase}:${step}` : phase;
+    if (!entry.blocks.has(key)) {
+        const block = el('section', 'phase-block');
+        const heading = el('div', 'phase-heading');
+        heading.append(el('h4', null, blockTitle(phase, step)));
+        const prose = el('p', 'prose');
+        const facts = el('div', 'facts');
+        block.append(heading, prose, facts);
+        entry.phases.append(block);
+        entry.blocks.set(key, { block, heading, prose, facts });
+    }
+    return entry.blocks.get(key);
+}
+
+function renderFacts(facts, phase, data, key) {
     facts.innerHTML = '';
     if (!data) return;
 
@@ -259,17 +315,18 @@ function renderFacts(facts, phase, data) {
         for (const observation of data.observations || []) {
             const item = el('li');
             item.dataset.sentiment = observation.sentiment || 'neutral';
-            if (observation.elementId && observation.elementId !== 'null') item.append(elementChip(observation.elementId));
-            item.append(document.createTextNode(` ${observation.note || ''}`));
+            if (/^e\d+$/.test(observation.elementId || '')) item.append(elementChip(observation.elementId, key), ' ');
+            item.append(observation.note || '');
             list.append(item);
         }
         facts.append(list);
 
         const next = data.nextAction;
         if (next?.type) {
-            const line = el('p', 'fact-line', `➡️ Next: ${next.type} `);
-            if (next.elementId && next.elementId !== 'null') line.append(elementChip(next.elementId));
-            if (next.reason) line.append(document.createTextNode(` — ${next.reason}`));
+            const line = el('p', 'fact-line', `${ACTION_ICONS[next.type] || '➡️'} Wants to ${next.type} `);
+            if (/^e\d+$/.test(next.elementId || '')) line.append(elementChip(next.elementId, key));
+            if (next.text) line.append(` "${next.text}"`);
+            if (next.reason) line.append(` — ${next.reason}`);
             facts.append(line);
         }
     }
@@ -295,32 +352,67 @@ const handlers = {
         addEventLog('phase', `${data.phase}: ${data.message}`);
     },
 
-    'persona.phase.started'({ personaId, phase }) {
-        const entry = cards.get(personaId);
+    'persona.capture'(data) {
+        const entry = cards.get(data.personaId);
         if (!entry) return;
-        entry.status.textContent = `${PERSONA_PHASE_TITLES[phase] || phase} — thinking aloud…`;
-        phaseBlock(entry, phase);
+
+        const key = captureKey(data.personaId, data.step);
+        captures.set(key, data);
+        entry.lastCaptureKey = key;
+        latestCaptureKey = key;
+
+        const { heading } = phaseBlock(entry, 'experience', data.step);
+        const thumb = el('img', 'thumb');
+        thumb.src = data.screenshotUrl;
+        thumb.alt = `Screen ${data.step}: ${data.title || data.url}`;
+        thumb.title = 'Show this screen';
+        thumb.addEventListener('click', () => {
+            pinnedCaptureKey = key;
+            shownCaptureKey = null; // re-render to show the pin note
+            showCapture(key);
+        });
+        heading.append(el('small', 'phase-url', data.title || data.url), thumb);
+
+        if (!pinnedCaptureKey) showCapture(key);
+        addEventLog('capture', `${personaName(data.personaId)} · screen ${data.step}: ${data.title || data.url}`);
     },
 
-    'persona.delta'({ personaId, phase, text }) {
+    'persona.phase.started'({ personaId, phase, step }) {
         const entry = cards.get(personaId);
         if (!entry) return;
-        phaseBlock(entry, phase).prose.textContent += text;
+        entry.status.textContent = `${blockTitle(phase, step)} — thinking aloud…`;
+        phaseBlock(entry, phase, step).prose.classList.add('streaming');
     },
 
-    'persona.phase.completed'({ personaId, phase, prose, data, parseError }) {
+    'persona.delta'({ personaId, phase, step, text }) {
+        const entry = cards.get(personaId);
+        if (!entry) return;
+        phaseBlock(entry, phase, step).prose.textContent += text;
+    },
+
+    'persona.phase.completed'({ personaId, phase, step, prose, data, parseError }) {
         const entry = cards.get(personaId);
         if (!entry) return;
 
-        const block = phaseBlock(entry, phase);
+        const key = step ? captureKey(personaId, step) : entry.lastCaptureKey;
+        const block = phaseBlock(entry, phase, step);
         block.prose.classList.remove('streaming');
         block.prose.textContent = '';
-        block.prose.append(proseWithElementRefs(prose));
-        renderFacts(block.facts, phase, data);
+        block.prose.append(proseWithElementRefs(prose, key));
+        renderFacts(block.facts, phase, data, key);
         if (parseError) block.facts.append(el('p', 'warning', `Structured answer unreadable: ${parseError}`));
 
         setEmotion(entry, data?.emotion, data?.emotionIntensity);
-        entry.status.textContent = `${PERSONA_PHASE_TITLES[phase] || phase} — done`;
+        entry.status.textContent = `${blockTitle(phase, step)} — done`;
+    },
+
+    'persona.action'({ personaId, step, action, outcome }) {
+        const entry = cards.get(personaId);
+        if (!entry) return;
+
+        const line = el('p', `action-line${outcome.ok ? '' : ' failed'}`);
+        line.append(`${outcome.ok ? (ACTION_ICONS[action.type] || '✅') : '⚠️'} `, proseWithElementRefs(outcome.description, captureKey(personaId, step)));
+        phaseBlock(entry, 'experience', step).facts.append(line);
     },
 
     'persona.error'({ personaId, message }) {
@@ -329,12 +421,7 @@ const handlers = {
             entry.status.textContent = `Dropped out: ${message}`;
             entry.card.classList.add('failed');
         }
-        addEventLog('persona error', `${personaId}: ${message}`);
-    },
-
-    'capture.completed'(data) {
-        renderCapture(data);
-        addEventLog('capture', `${data.title || data.url} (HTTP ${data.status})`);
+        addEventLog('persona error', `${personaName(personaId)}: ${message}`);
     },
 
     'usage.updated'(usage) {
@@ -373,12 +460,13 @@ sessionForm.addEventListener('submit', async (event) => {
     const url = document.getElementById('url-input').value;
     const scenario = document.getElementById('scenario-input').value;
     const device = document.getElementById('device-input').value;
+    const maxSteps = Number(document.getElementById('max-steps-input').value);
     const acceptCookies = document.getElementById('accept-cookies-input').checked;
 
     const response = await fetch('/api/sessions/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, scenario, device, acceptCookies, selectedPersonaIds }),
+        body: JSON.stringify({ url, scenario, device, maxSteps, acceptCookies, selectedPersonaIds }),
     });
 
     const payload = await response.json();

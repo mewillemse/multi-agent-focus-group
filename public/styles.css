@@ -115,6 +115,12 @@ textarea {
     resize: vertical;
 }
 
+.field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
 label.checkbox-field {
     display: flex;
     align-items: center;
@@ -391,8 +397,69 @@ button:hover {
     border-top: 1px solid var(--line);
 }
 
+.phase-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.phase-heading .phase-url {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.phase-heading .thumb {
+    width: 56px;
+    max-height: 72px;
+    object-fit: cover;
+    object-position: top;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.phase-heading .thumb:hover {
+    border-color: var(--primary);
+}
+
+.action-line {
+    margin: 8px 0 0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--panel-alt);
+    font-size: 0.88rem;
+}
+
+.action-line.failed {
+    background: #fdf3e3;
+}
+
+.capture-owner {
+    display: block;
+    color: var(--primary);
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+button.link-button {
+    width: auto;
+    margin-top: 6px;
+    padding: 0;
+    background: none;
+    color: var(--primary);
+    font-weight: 600;
+    font-size: 0.82rem;
+}
+
 .phase-block h4 {
-    margin: 0 0 6px;
+    flex: none;
+    margin: 0;
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;

@@ -9,11 +9,12 @@ const { describeElements } = require('../capture/playwright');
  * through `emit(eventName, payload)`.
  */
 class PersonaAgent {
-    constructor({ persona, session, model, emit }) {
+    constructor({ persona, session, model, emit, onUsage = () => {} }) {
         this.persona = persona;
         this.session = session;
         this.model = model;
         this.emit = emit;
+        this.onUsage = onUsage;
         this.results = {};
         this.journey = [];
 
@@ -39,8 +40,15 @@ class PersonaAgent {
         }));
     }
 
-    async experience(capture) {
+    /**
+     * One step of browsing: the persona looks at `capture` and picks a nextAction.
+     * `situation` tells it what just happened ("The page has loaded.", "You clicked ...").
+     */
+    async experience(capture, { step, maxSteps, situation }) {
         const prompt = renderPrompt('persona-experience', {
+            situation,
+            step,
+            maxSteps,
             device: capture.device,
             title: capture.title || '(no title)',
             pageUrl: capture.url,
@@ -51,10 +59,16 @@ class PersonaAgent {
         const result = await this.#turn('experience', [
             { type: 'text', text: prompt },
             { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${capture.screenshotBase64}` } },
-        ], { maxTokens: 1200 });
+        ], { maxTokens: 1200, step });
 
-        this.journey.push({ title: capture.title || capture.url, plannedAction: result.data?.nextAction?.type });
+        this.journey.push({ title: capture.title || capture.url, action: result.data?.nextAction || null, outcome: null });
         return result;
+    }
+
+    // What happened when the last step's nextAction was carried out.
+    recordOutcome(outcome) {
+        const last = this.journey[this.journey.length - 1];
+        if (last) last.outcome = outcome;
     }
 
     reflect() {
@@ -65,18 +79,32 @@ class PersonaAgent {
     #describeJourney() {
         if (!this.journey.length) return '- You did not get to see the page.';
 
-        const lines = this.journey.map((step, index) => `- Screen ${index + 1}: you looked at "${step.title}" without scrolling.`);
-        const last = this.journey[this.journey.length - 1];
-        if (last.plannedAction) {
-            lines.push(`- You planned to ${last.plannedAction} next, but the visit ended before you could.`);
-        }
-        return lines.join('\n');
+        return this.journey.map((step, index) => {
+            const seen = `- Screen ${index + 1}: you looked at "${step.title}".`;
+            if (step.outcome) return `${seen} ${step.outcome.description}`;
+
+            const type = step.action?.type;
+            if (type === 'done') return `${seen} You felt you were done.`;
+            if (type === 'leave') return `${seen} You decided to leave the site.`;
+            if (type) return `${seen} You wanted to ${type} next, but the visit ended there (time was up).`;
+            return seen;
+        }).join('\n');
     }
 
-    async #turn(phase, content, { maxTokens = 800 } = {}) {
+    // Older screenshots are replaced by a note: the model only needs the current one, and images are costly.
+    #dropOldScreenshots() {
+        for (const message of this.messages) {
+            if (!Array.isArray(message.content)) continue;
+            const text = message.content.filter((part) => part.type === 'text').map((part) => part.text).join('\n');
+            message.content = `${text}\n\n(Screenshot of this earlier screen omitted.)`;
+        }
+    }
+
+    async #turn(phase, content, { maxTokens = 800, step } = {}) {
         const personaId = this.persona.id;
+        this.#dropOldScreenshots();
         this.messages.push({ role: 'user', content });
-        this.emit('persona.phase.started', { personaId, phase });
+        this.emit('persona.phase.started', { personaId, phase, step });
 
         let result;
         const stream = splitProseAndJson(streamChatCompletion({
@@ -88,7 +116,7 @@ class PersonaAgent {
 
         for await (const event of stream) {
             if (event.type === 'delta') {
-                this.emit('persona.delta', { personaId, phase, text: event.text });
+                this.emit('persona.delta', { personaId, phase, step, text: event.text });
             } else {
                 result = event;
             }
@@ -96,10 +124,12 @@ class PersonaAgent {
 
         this.messages.push({ role: 'assistant', content: result.content });
         this.results[phase] = result;
+        this.onUsage(result.usage);
 
         this.emit('persona.phase.completed', {
             personaId,
             phase,
+            step,
             prose: result.prose,
             data: result.data,
             parseError: result.parseError,

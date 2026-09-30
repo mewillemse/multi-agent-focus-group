@@ -77,51 +77,195 @@ async function closeBrowser() {
     await browser?.close();
 }
 
+// Fields a persona must never fill in: the simulation does not submit personal data to real sites.
+const SENSITIVE_INPUT = 'input[type="password"], input[type="email"], input[type="tel"], [autocomplete^="cc-"]';
+
 /**
- * Opens `url` and captures what a visitor sees before scrolling:
- * a JPEG screenshot, the visible text, and an element registry mapping
- * short ids (e1, e2, ...) to a selector and bounding box.
+ * One persona's own browser tab. It stays open across steps so the persona
+ * can click, type, scroll and go back, and each capture() records what is
+ * on screen at that moment.
  */
-async function capturePage({ url, device = 'desktop', outputDir, name = 'initial', acceptCookies = true }) {
-    const profile = DEVICE_PROFILES[device] || DEVICE_PROFILES.desktop;
-    const context = await newContext(profile);
-    const page = await context.newPage();
+class BrowserSession {
+    static async open({ url, device = 'desktop', acceptCookies = true }) {
+        const profile = DEVICE_PROFILES[device] || DEVICE_PROFILES.desktop;
+        const context = await newContext(profile);
+        const session = new BrowserSession(context, await context.newPage(), device);
 
-    try {
-        const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+        try {
+            const response = await session.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            session.status = response?.status() ?? null;
+            await session.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+            session.cookieConsent = acceptCookies ? await acceptCookieBanner(session.page) : null;
+        } catch (error) {
+            await session.close();
+            throw error;
+        }
+        return session;
+    }
 
-        const cookieConsent = acceptCookies ? await acceptCookieBanner(page) : null;
+    constructor(context, page, device) {
+        this.context = context;
+        this.page = page;
+        this.device = device;
+        this.status = null;
+        this.cookieConsent = null;
+        this.elements = [];
 
-        const { elements, text, visibleText } = await page.evaluate(extractPageModel, {
+        // Links that open a new tab would leave this page behind; follow them here instead.
+        context.on('page', async (popup) => {
+            const target = popup.url();
+            await popup.close().catch(() => {});
+            if (target && target !== 'about:blank') {
+                await this.page.goto(target, { waitUntil: 'domcontentloaded' }).catch(() => {});
+            }
+        });
+    }
+
+    /**
+     * Records what a visitor sees right now: a JPEG screenshot of the viewport,
+     * the visible text, and an element registry mapping short ids (e1, e2, ...)
+     * to a selector and a viewport-relative bounding box.
+     */
+    async capture({ outputDir, name }) {
+        await this.#waitForStableScreen();
+
+        const { elements, text, visibleText } = await this.page.evaluate(extractPageModel, {
             maxElements: MAX_ELEMENTS,
             maxTextLength: MAX_TEXT_LENGTH,
         });
+        this.elements = elements;
 
         await fs.mkdir(outputDir, { recursive: true });
         const screenshotFile = `${name}.jpg`;
-        const screenshot = await page.screenshot({ type: 'jpeg', quality: 75 });
+        const screenshot = await this.page.screenshot({ type: 'jpeg', quality: 75 });
         await fs.writeFile(path.join(outputDir, screenshotFile), screenshot);
 
-        const status = response?.status() ?? null;
-
         return {
-            requestedUrl: url,
-            url: page.url(),
-            status,
-            blockedReason: detectBlock(status, elements),
-            cookieConsent,
-            title: await page.title(),
-            device,
-            viewport: page.viewportSize(),
+            url: this.page.url(),
+            status: this.status,
+            blockedReason: detectBlock(this.status, elements),
+            cookieConsent: this.cookieConsent,
+            title: await this.page.title(),
+            device: this.device,
+            viewport: this.page.viewportSize(),
             screenshotFile,
             screenshotBase64: screenshot.toString('base64'),
             text,
             visibleText,
             elements,
         };
-    } finally {
-        await context.close();
+    }
+
+    /**
+     * Carries out a persona's nextAction against the latest capture.
+     * Returns { ok, description } in plain words for the persona to read.
+     */
+    async perform({ type, elementId, text } = {}) {
+        const element = this.elements.find((item) => item.id === elementId);
+        const label = element ? `${element.role}${element.name ? ` "${element.name}"` : ''} [${element.id}]` : `[${elementId}]`;
+        const urlBefore = this.page.url();
+
+        const describeResult = (what) => {
+            const now = this.page.url();
+            return `${what} ${now === urlBefore ? 'You are still on the same page.' : `The page changed to ${now}.`}`;
+        };
+
+        try {
+            if (type === 'scroll') {
+                const { moved, where } = await this.page.evaluate(scrollDown);
+                await this.page.waitForTimeout(600); // lazy-loaded content
+                return moved > 0
+                    ? { ok: true, description: `You scrolled down ${where}.` }
+                    : { ok: false, description: `You tried to scroll down ${where}, but you are already at the bottom of it.` };
+            }
+
+            if (type === 'back') {
+                const response = await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
+                if (!response) return { ok: false, description: 'You tried to go back, but there is no previous page.' };
+                await this.page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
+                return { ok: true, description: describeResult('You went back.') };
+            }
+
+            if (!element) {
+                return { ok: false, description: `You tried to ${type} ${label}, but that element is not on the current screen.` };
+            }
+
+            const locator = this.page.locator(`[data-fg-id="${element.id}"]`).first();
+
+            if (type === 'click') {
+                await this.#runAndSettle(() => locator.click({ timeout: 5000 }));
+                return { ok: true, description: describeResult(`You clicked ${label}.`) };
+            }
+
+            if (type === 'type') {
+                if (!text) return { ok: false, description: `You wanted to type into ${label}, but did not say what.` };
+                const field = await this.#editableField(locator);
+                if (!field) return { ok: false, description: `You tried to type into ${label}, but there was no text field to type in.` };
+                if (await field.evaluate((node, selector) => node.matches(selector), SENSITIVE_INPUT)) {
+                    return { ok: false, description: `This study does not fill in personal details, so you did not type into ${label}.` };
+                }
+                await field.fill(text, { timeout: 5000 });
+                await this.#runAndSettle(() => field.press('Enter'));
+                return { ok: true, description: describeResult(`You typed "${text}" into ${label} and pressed Enter.`) };
+            }
+
+            return { ok: false, description: `"${type}" is not something you can do in this study.` };
+        } catch (error) {
+            const reason = error.message.split('\n')[0].replace(/^[\w.]+: /, '');
+            return { ok: false, description: `You tried to ${type} ${label}, but it did not work (${reason}).` };
+        }
+    }
+
+    // The element itself if it takes text; otherwise click it (e.g. a search button that opens a field) and use what got focus.
+    async #editableField(locator) {
+        const isEditable = (node) => node.matches('input, textarea, [contenteditable="true"]');
+        if (await locator.evaluate(isEditable)) return locator;
+
+        await locator.click({ timeout: 5000 });
+        await this.page.waitForTimeout(500);
+        const focused = this.page.locator('*:focus').first();
+        if (await focused.count() && await focused.evaluate(isEditable)) return focused;
+
+        const visibleInput = this.page.locator('input[type="search"]:visible, input[type="text"]:visible, input:not([type]):visible').first();
+        return (await visibleInput.count()) ? visibleInput : null;
+    }
+
+    // Fades, spinners and overlays after a click would otherwise end up in the screenshot.
+    async #waitForStableScreen({ timeoutMs = 3000, intervalMs = 250 } = {}) {
+        const deadline = Date.now() + timeoutMs;
+        let previous = null;
+        while (Date.now() < deadline) {
+            const frame = await this.page.screenshot({ type: 'jpeg', quality: 30 }).catch(() => null);
+            if (frame && previous && frame.equals(previous)) return;
+            previous = frame;
+            await this.page.waitForTimeout(intervalMs);
+        }
+    }
+
+    // Runs a click or key press and waits for its effect. If it started a page
+    // navigation, wait for the new document; otherwise the screenshot would show
+    // the old page fading out.
+    async #runAndSettle(action) {
+        let newDocument = null;
+        const onRequest = (request) => {
+            if (!newDocument && request.isNavigationRequest() && request.frame() === this.page.mainFrame()) {
+                newDocument = this.page.waitForEvent('domcontentloaded', { timeout: 15000 }).catch(() => {});
+            }
+        };
+
+        this.page.on('request', onRequest);
+        try {
+            await action();
+            await this.page.waitForTimeout(300); // time for a click-triggered navigation to start
+            if (newDocument) await newDocument;
+        } finally {
+            this.page.off('request', onRequest);
+        }
+        await this.page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
+    }
+
+    async close() {
+        await this.context.close().catch(() => {});
     }
 }
 
@@ -158,6 +302,35 @@ async function acceptCookieBanner(page) {
         return { accepted: false, method: found.method, label, error: error.message.split('\n')[0] };
     }
     return { accepted: true, method: found.method, label };
+}
+
+// Runs inside the page. Scrolls whatever the visitor is looking at: an open
+// pop-up or panel with its own scroll area if there is one, else the page.
+function scrollDown() {
+    const x = window.innerWidth / 2;
+    const y = window.innerHeight / 2;
+    let node = document.elementFromPoint(x, y);
+    while (node?.shadowRoot) {
+        const inner = node.shadowRoot.elementFromPoint(x, y);
+        if (!inner || inner === node) break;
+        node = inner;
+    }
+
+    for (; node && node !== document.body && node !== document.documentElement; node = node.parentElement || node.getRootNode().host) {
+        if (!(node instanceof Element)) continue;
+        const { overflowY } = getComputedStyle(node);
+        if (/(auto|scroll)/.test(overflowY) && node.scrollHeight > node.clientHeight + 1) {
+            const before = node.scrollTop;
+            node.scrollBy(0, Math.round(node.clientHeight * 0.8));
+            const rect = node.getBoundingClientRect();
+            const coversScreen = rect.width >= window.innerWidth * 0.95 && rect.height >= window.innerHeight * 0.9;
+            return { moved: node.scrollTop - before, where: coversScreen ? 'the page' : 'inside the pop-up or panel' };
+        }
+    }
+
+    const before = window.scrollY;
+    window.scrollBy(0, Math.round(window.innerHeight * 0.8));
+    return { moved: window.scrollY - before, where: 'the page' };
 }
 
 // Bot walls and error pages give personas nothing real to react to.
@@ -258,6 +431,9 @@ function extractPageModel({ maxElements, maxTextLength }) {
         return !top || composedContains(el, top) || composedContains(top, el);
     }
 
+    // Ids are per capture; drop the ones from the previous step so clicks cannot hit stale targets.
+    for (const el of queryAllDeep(document, '[data-fg-id]')) el.removeAttribute('data-fg-id');
+
     const candidates = [];
     for (const el of queryAllDeep(document, SELECTOR)) {
         const rect = el.getBoundingClientRect();
@@ -279,9 +455,10 @@ function extractPageModel({ maxElements, maxTextLength }) {
             name: accessibleName(el),
             href: el.getAttribute('href') || undefined,
             selector: cssPath(el),
+            // Relative to the viewport, i.e. to this capture's screenshot.
             box: {
-                x: Math.round(rect.left + window.scrollX),
-                y: Math.round(rect.top + window.scrollY),
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
                 width: Math.round(rect.width),
                 height: Math.round(rect.height),
             },
@@ -328,4 +505,4 @@ function describeElements(elements, { onlyInViewport = false } = {}) {
         .join('\n');
 }
 
-module.exports = { capturePage, closeBrowser, describeElements };
+module.exports = { BrowserSession, closeBrowser, describeElements };

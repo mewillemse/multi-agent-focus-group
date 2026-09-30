@@ -59,7 +59,7 @@ app.get('/api/models', async (req, res) => {
 
 app.post('/api/sessions/start', async (req, res) => {
     try {
-        const { url, scenario, device = 'desktop', acceptCookies = true, selectedPersonaIds = [], panelId = null } = req.body || {};
+        const { url, scenario, device = 'desktop', acceptCookies = true, maxSteps = 4, selectedPersonaIds = [], panelId = null } = req.body || {};
 
         if (!url) {
             return res.status(400).json({ error: 'URL is required.' });
@@ -84,6 +84,7 @@ app.post('/api/sessions/start', async (req, res) => {
             scenario: scenario || 'No scenario specified',
             device: device === 'mobile' ? 'mobile' : 'desktop',
             acceptCookies: acceptCookies !== false,
+            maxSteps: Math.min(Math.max(Number.parseInt(maxSteps, 10) || 4, 1), 8),
             selectedPersonaIds: selected.map((persona) => persona.id),
             personas: selected,
             events: [],
@@ -101,7 +102,7 @@ app.post('/api/sessions/start', async (req, res) => {
 
         broadcastSessionEvent(sessionId, 'phase.started', {
             phase: 'setup',
-            message: `Session created with ${selected.length} personas on ${session.device}.`,
+            message: `Session created with ${selected.length} personas on ${session.device}, up to ${session.maxSteps} screens each.`,
         });
 
         const emit = (eventName, payload) => broadcastSessionEvent(sessionId, eventName, payload);
