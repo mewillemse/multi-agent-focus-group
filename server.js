@@ -59,7 +59,16 @@ app.get('/api/models', async (req, res) => {
 
 app.post('/api/sessions/start', async (req, res) => {
     try {
-        const { url, scenario, device = 'desktop', acceptCookies = true, maxSteps = 4, selectedPersonaIds = [], panelId = null } = req.body || {};
+        const {
+            url,
+            scenario,
+            device = 'desktop',
+            acceptCookies = true,
+            maxSteps = 4,
+            discussionRounds = 3,
+            selectedPersonaIds = [],
+            panelId = null,
+        } = req.body || {};
 
         if (!url) {
             return res.status(400).json({ error: 'URL is required.' });
@@ -84,7 +93,8 @@ app.post('/api/sessions/start', async (req, res) => {
             scenario: scenario || 'No scenario specified',
             device: device === 'mobile' ? 'mobile' : 'desktop',
             acceptCookies: acceptCookies !== false,
-            maxSteps: Math.min(Math.max(Number.parseInt(maxSteps, 10) || 4, 1), 8),
+            maxSteps: clampInt(maxSteps, 1, 8, 4),
+            discussionRounds: clampInt(discussionRounds, 0, 6, 3),
             selectedPersonaIds: selected.map((persona) => persona.id),
             personas: selected,
             events: [],
@@ -212,6 +222,11 @@ app.get('/api/test/llm/stream', async (req, res) => {
 
     res.end();
 });
+
+function clampInt(value, min, max, fallback) {
+    const number = Number.parseInt(value, 10);
+    return Number.isNaN(number) ? fallback : Math.min(Math.max(number, min), max);
+}
 
 function broadcastSessionEvent(sessionId, eventName, payload) {
     const session = getSession(sessionId);

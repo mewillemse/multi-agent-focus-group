@@ -1,5 +1,4 @@
-const { streamChatCompletion } = require('../llm/nova');
-const { splitProseAndJson } = require('../llm/structuredStream');
+const { streamTurn } = require('./streamTurn');
 const { renderPrompt, describePersona } = require('../prompts');
 const { describeElements } = require('../capture/playwright');
 
@@ -72,11 +71,11 @@ class PersonaAgent {
     }
 
     reflect() {
-        return this.#turn('reflection', renderPrompt('persona-reflection', { journey: this.#describeJourney() }));
+        return this.#turn('reflection', renderPrompt('persona-reflection', { journey: this.describeJourney() }));
     }
 
     // Plain account of what actually happened, so reflections cannot invent steps.
-    #describeJourney() {
+    describeJourney() {
         if (!this.journey.length) return '- You did not get to see the page.';
 
         return this.journey.map((step, index) => {
@@ -100,31 +99,41 @@ class PersonaAgent {
         }
     }
 
-    async #turn(phase, content, { maxTokens = 800, step } = {}) {
-        const personaId = this.persona.id;
+    /**
+     * One contribution to the group discussion. `update` holds what was said
+     * since this persona last spoke plus the moderator's question; the caller
+     * decides where the streamed prose goes.
+     */
+    async discuss(update, { onDelta }) {
+        return this.#ask(update, { maxTokens: 600, onDelta });
+    }
+
+    async #ask(content, { maxTokens, onDelta }) {
         this.#dropOldScreenshots();
         this.messages.push({ role: 'user', content });
-        this.emit('persona.phase.started', { personaId, phase, step });
 
-        let result;
-        const stream = splitProseAndJson(streamChatCompletion({
+        const result = await streamTurn({
             model: this.model,
             messages: this.messages,
-            max_tokens: maxTokens,
+            maxTokens,
             temperature: this.persona.llm?.temperature,
-        }));
-
-        for await (const event of stream) {
-            if (event.type === 'delta') {
-                this.emit('persona.delta', { personaId, phase, step, text: event.text });
-            } else {
-                result = event;
-            }
-        }
+            onDelta,
+        });
 
         this.messages.push({ role: 'assistant', content: result.content });
-        this.results[phase] = result;
         this.onUsage(result.usage);
+        return result;
+    }
+
+    async #turn(phase, content, { maxTokens = 800, step } = {}) {
+        const personaId = this.persona.id;
+        this.emit('persona.phase.started', { personaId, phase, step });
+
+        const result = await this.#ask(content, {
+            maxTokens,
+            onDelta: (text) => this.emit('persona.delta', { personaId, phase, step, text }),
+        });
+        this.results[phase] = result;
 
         this.emit('persona.phase.completed', {
             personaId,

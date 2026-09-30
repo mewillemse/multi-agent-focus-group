@@ -1,12 +1,15 @@
 const path = require('path');
 const { BrowserSession } = require('../capture/playwright');
 const { PersonaAgent } = require('../agents/personaAgent');
+const { ModeratorAgent } = require('../agents/moderatorAgent');
+const { runDiscussion } = require('./discussion');
 
 /**
  * Runs one focus-group session end to end, reporting progress through
  * `emit(eventName, payload)`. Current phases:
- *   goal -> experience (each persona browses up to maxSteps screens) -> reflection
- * Discussion, convergence and reporting come later.
+ *   goal -> experience (each persona browses up to maxSteps screens)
+ *   -> reflection -> discussion (moderated, needs 2+ personas)
+ * Reporting comes later.
  */
 async function runSession({ session, emit, model, capturesDir }) {
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 0 };
@@ -34,6 +37,13 @@ async function runSession({ session, emit, model, capturesDir }) {
         startPhase('reflection', 'Personas are looking back on their visit.');
         agents = await runPhase(agents, (agent) => agent.reflect());
 
+        let discussion = null;
+        if (agents.length >= 2 && session.discussionRounds > 0) {
+            startPhase('discussion', 'The moderator is leading a group discussion.');
+            const moderator = new ModeratorAgent({ session, agents, model, onUsage: addUsage });
+            discussion = await runDiscussion({ agents, moderator, rounds: session.discussionRounds, emit });
+        }
+
         emit('session.completed', {
             usage,
             personas: agents.map((agent) => ({
@@ -42,6 +52,7 @@ async function runSession({ session, emit, model, capturesDir }) {
                 journey: agent.journey,
                 reflection: agent.results.reflection?.data,
             })),
+            discussion,
         });
     } finally {
         await Promise.all([...browsers.values()].map((opening) => opening.then((browser) => browser.close(), () => {})));

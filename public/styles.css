@@ -540,6 +540,107 @@ button.element-chip:focus-visible {
     color: white;
 }
 
+/* ---------- group discussion ---------- */
+
+.discussion {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+}
+
+.chat {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.chat-message {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+}
+
+.chat-message.failed {
+    opacity: 0.6;
+}
+
+.chat-body {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: 4px 12px 12px 12px;
+    background: #fbfcff;
+}
+
+.chat-message.moderator .chat-body {
+    background: var(--panel-alt);
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.chat-header .emotion-badge {
+    padding: 2px 8px;
+    font-size: 0.75rem;
+}
+
+.chat-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.chat-meta:not(:empty) {
+    margin-top: 8px;
+}
+
+.chat-tag {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.75rem;
+}
+
+.chat-tag.agree {
+    color: var(--success);
+}
+
+.chat-tag.disagree {
+    color: var(--danger);
+}
+
+.chat-tag.changed {
+    color: var(--warning);
+}
+
+.discussion-summary {
+    flex-basis: 100%;
+    font-size: 0.9rem;
+}
+
+.discussion-summary h4 {
+    margin: 10px 0 4px;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+}
+
+.discussion-summary ul {
+    margin: 0;
+    padding-left: 18px;
+}
+
 /* ---------- event log ---------- */
 
 .event-log {

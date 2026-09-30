@@ -5,14 +5,24 @@ const eventList = document.getElementById('event-list');
 const phaseSteps = document.getElementById('phase-steps');
 const captureView = document.getElementById('capture');
 const personaFeed = document.getElementById('persona-feed');
+const discussionView = document.getElementById('discussion');
+const chat = document.getElementById('chat');
 
 const PHASES = [
     ['setup', 'Setup'],
     ['goal', 'Goals'],
     ['experience', 'Browsing'],
     ['reflection', 'Reflection'],
+    ['discussion', 'Discussion'],
     ['done', 'Done'],
 ];
+
+const MODERATOR_INTENTS = {
+    probe_difference: 'probing a difference',
+    invite_quiet: 'inviting a quiet participant',
+    follow_up: 'following up',
+    challenge_consensus: 'challenging consensus',
+};
 
 const EMOTIONS = {
     curious: '🤔',
@@ -44,6 +54,7 @@ let captures = new Map(); // "personaId:step" -> capture payload
 let latestCaptureKey = null; // what the screenshot panel follows by default
 let pinnedCaptureKey = null; // set by clicking a thumbnail
 let shownCaptureKey = null;
+let chatMessages = new Map(); // message id -> { item, text, meta, speaker }
 
 async function loadPersonas() {
     const response = await fetch('/api/personas');
@@ -110,24 +121,28 @@ function addEventLog(label, message) {
 const captureKey = (personaId, step) => `${personaId}:${step}`;
 
 // Turns "the search bar [e4]" or "sizes [e19, e20]" into text with chips that highlight
-// those elements on that capture's screenshot.
-function proseWithElementRefs(text, key) {
+// those elements on that capture's screenshot. In the discussion, personas cite
+// their own screens as [s2.e21]; `personaId` resolves those.
+function proseWithElementRefs(text, key, personaId) {
     const fragment = document.createDocumentFragment();
-    for (const part of (text || '').split(/(\[e\d+(?:\s*,\s*e\d+)*\])/)) {
-        if (!/^\[e\d+/.test(part)) {
+    for (const part of (text || '').split(/(\[e\d+(?:\s*,\s*e\d+)*\]|\[s\d+\.e\d+\])/)) {
+        const screenRef = part.match(/^\[s(\d+)\.(e\d+)\]$/);
+        if (screenRef && personaId) {
+            fragment.append(elementChip(screenRef[2], captureKey(personaId, Number(screenRef[1])), `screen ${screenRef[1]} · ${screenRef[2]}`));
+        } else if (/^\[e\d+/.test(part)) {
+            part.match(/e\d+/g).forEach((id, index) => {
+                if (index) fragment.append(' ');
+                fragment.append(elementChip(id, key));
+            });
+        } else {
             fragment.append(part);
-            continue;
         }
-        part.match(/e\d+/g).forEach((id, index) => {
-            if (index) fragment.append(' ');
-            fragment.append(elementChip(id, key));
-        });
     }
     return fragment;
 }
 
-function elementChip(elementId, key) {
-    const chip = el('button', 'element-chip', elementId);
+function elementChip(elementId, key, label) {
+    const chip = el('button', 'element-chip', label || elementId);
     chip.type = 'button';
     const element = captures.get(key)?.elements.find((item) => item.id === elementId);
     chip.title = element ? `${element.role}${element.name ? ` "${element.name}"` : ''}` : 'Unknown element';
@@ -155,9 +170,12 @@ function resetView(data) {
     latestCaptureKey = null;
     pinnedCaptureKey = null;
     shownCaptureKey = null;
+    chatMessages = new Map();
 
     eventList.innerHTML = '';
     personaFeed.innerHTML = '';
+    chat.innerHTML = '';
+    discussionView.hidden = true;
     captureView.innerHTML = '';
     captureView.append(el('p', 'empty-note', 'Screenshots appear here as the personas browse.'));
     renderPhaseSteps(null);
@@ -339,6 +357,45 @@ function renderFacts(facts, phase, data, key) {
     }
 }
 
+// ---------- discussion ----------
+
+function renderChatMeta(message, data) {
+    const { meta, speaker } = message;
+    meta.innerHTML = '';
+    if (!data) return;
+
+    if (speaker === 'moderator') {
+        if (data.intent) {
+            const to = (data.addressees || []).map(personaName).join(', ');
+            meta.append(el('span', 'chat-tag', `${MODERATOR_INTENTS[data.intent] || data.intent}${to ? ` → ${to}` : ''}`));
+        }
+        if (data.consensus || data.disagreements) meta.append(renderDiscussionSummary(data));
+        return;
+    }
+
+    if (data.agreesWith?.length) meta.append(el('span', 'chat-tag agree', `agrees with ${data.agreesWith.join(', ')}`));
+    if (data.disagreesWith?.length) meta.append(el('span', 'chat-tag disagree', `disagrees with ${data.disagreesWith.join(', ')}`));
+    if (data.changedMind) {
+        meta.append(el('span', 'chat-tag changed', `changed mind${data.changedMindReason ? `: ${data.changedMindReason}` : ''}`));
+    }
+}
+
+function renderDiscussionSummary(data) {
+    const summary = el('div', 'discussion-summary');
+    const section = (title, items) => {
+        if (!items?.length) return;
+        const list = el('ul');
+        for (const item of items) list.append(el('li', null, item));
+        summary.append(el('h4', null, title), list);
+    };
+
+    section('Agreed', data.consensus);
+    section('Disagreed', (data.disagreements || []).map((item) =>
+        (typeof item === 'string' ? item : `${item.topic}: ${item.positions}`)));
+    section('Open questions', data.openQuestions);
+    return summary;
+}
+
 // ---------- event handlers ----------
 
 const handlers = {
@@ -415,6 +472,58 @@ const handlers = {
         phaseBlock(entry, 'experience', step).facts.append(line);
     },
 
+    'discussion.message.started'({ id, speaker, name }) {
+        discussionView.hidden = false;
+        const isModerator = speaker === 'moderator';
+        const persona = isModerator ? { name: 'Moderator', avatarColor: '#5f6d85' } : (personasById.get(speaker) || { name });
+
+        const item = el('li', `chat-message${isModerator ? ' moderator' : ''}`);
+        const body = el('div', 'chat-body');
+        const header = el('div', 'chat-header');
+        header.append(el('strong', null, persona.name));
+        const text = el('p', 'prose streaming');
+        const meta = el('div', 'chat-meta');
+        body.append(header, text, meta);
+        item.append(avatar(persona), body);
+        chat.append(item);
+
+        chatMessages.set(id, { item, header, text, meta, speaker });
+    },
+
+    'discussion.delta'({ id, text }) {
+        const message = chatMessages.get(id);
+        if (message) message.text.textContent += text;
+    },
+
+    'discussion.message.completed'({ id, speaker, prose, data, parseError }) {
+        const message = chatMessages.get(id);
+        if (!message) return;
+
+        const isPersona = speaker !== 'moderator';
+        const key = isPersona ? cards.get(speaker)?.lastCaptureKey : null;
+        message.text.classList.remove('streaming');
+        message.text.textContent = '';
+        message.text.append(proseWithElementRefs(prose, key, isPersona ? speaker : null));
+        renderChatMeta(message, data);
+        if (parseError) message.meta.append(el('p', 'warning', `Structured answer unreadable: ${parseError}`));
+
+        if (isPersona && data?.emotion) {
+            const badge = el('span', 'emotion-badge');
+            message.header.append(badge);
+            setEmotion({ badge }, data.emotion, data.emotionIntensity);
+            const entry = cards.get(speaker);
+            if (entry) setEmotion(entry, data.emotion, data.emotionIntensity);
+        }
+    },
+
+    'discussion.message.failed'({ id, message: reason }) {
+        const message = chatMessages.get(id);
+        if (!message) return;
+        message.text.classList.remove('streaming');
+        message.item.classList.add('failed');
+        message.meta.append(el('p', 'warning', `No reply: ${reason}`));
+    },
+
     'persona.error'({ personaId, message }) {
         const entry = cards.get(personaId);
         if (entry) {
@@ -461,12 +570,13 @@ sessionForm.addEventListener('submit', async (event) => {
     const scenario = document.getElementById('scenario-input').value;
     const device = document.getElementById('device-input').value;
     const maxSteps = Number(document.getElementById('max-steps-input').value);
+    const discussionRounds = Number(document.getElementById('discussion-rounds-input').value);
     const acceptCookies = document.getElementById('accept-cookies-input').checked;
 
     const response = await fetch('/api/sessions/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, scenario, device, maxSteps, acceptCookies, selectedPersonaIds }),
+        body: JSON.stringify({ url, scenario, device, maxSteps, discussionRounds, acceptCookies, selectedPersonaIds }),
     });
 
     const payload = await response.json();
