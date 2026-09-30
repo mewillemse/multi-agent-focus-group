@@ -6,6 +6,7 @@ const { listPersonas, listPanels } = require('./src/dataLoader');
 const { createSession, getSession, updateSession } = require('./src/sessionStore');
 const { getModels, createChatCompletion, streamChatCompletion } = require('./src/llm/nova');
 const { runSession } = require('./src/orchestrator/orchestrator');
+const { closeBrowser } = require('./src/capture/playwright');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -254,3 +255,12 @@ app.get('*', (req, res) => {
 app.listen(port, () => {
     console.log(`Multi-agent focus group app listening on http://localhost:${port}`);
 });
+
+// Playwright installs its own SIGTERM handler, which closes the browser but does
+// not exit, so without this `node --watch` restarts and `kill` never complete.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, async () => {
+        await closeBrowser().catch(() => {});
+        process.exit(0);
+    });
+}

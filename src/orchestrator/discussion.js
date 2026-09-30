@@ -20,6 +20,11 @@ async function runDiscussion({ agents, moderator, rounds, emit }) {
         emit('discussion.message.started', { id, speaker, name });
         try {
             const result = await run((text) => emit('discussion.delta', { id, text }));
+            // Models sometimes echo the transcript format ("Moderator: ...") or wrap the turn in quotes.
+            result.prose = result.prose
+                .replace(new RegExp(`^\\s*(${escapeRegExp(name)}|Moderator)\\s*:\\s*`, 'i'), '')
+                .replace(/^"([\s\S]*)"$/, '$1')
+                .trim();
             transcript.push({ speaker, name, text: result.prose });
             emit('discussion.message.completed', {
                 id,
@@ -92,6 +97,10 @@ async function runDiscussion({ agents, moderator, rounds, emit }) {
     const closing = await say('moderator', 'Moderator', (onDelta) => moderator.close({ transcript: format(transcript), onDelta }));
 
     return { transcript, summary: closing.data };
+}
+
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 module.exports = { runDiscussion };
